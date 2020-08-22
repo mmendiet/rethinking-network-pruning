@@ -33,7 +33,10 @@ args.cuda = not args.no_cuda and torch.cuda.is_available()
 if not os.path.exists(args.save):
     os.makedirs(args.save)
 
-model = resnet(depth=args.depth, dataset=args.dataset)
+import models.wideresnet as mwr
+num_classes = 100
+image_size = 32
+model = mwr.Model(num_classes, input_size=image_size)
 
 if args.cuda:
     model.cuda()
@@ -52,13 +55,13 @@ if args.model:
 total = 0
 
 for m in model.modules():
-    if isinstance(m, nn.BatchNorm2d):
+    if isinstance(m, nn.BatchNorm2d) and m.weight is not None:
         total += m.weight.data.shape[0]
 
 bn = torch.zeros(total)
 index = 0
 for m in model.modules():
-    if isinstance(m, nn.BatchNorm2d):
+    if isinstance(m, nn.BatchNorm2d) and m.weight is not None:
         size = m.weight.data.shape[0]
         bn[index:(index+size)] = m.weight.data.abs().clone()
         index += size
@@ -72,7 +75,7 @@ pruned = 0
 cfg = []
 cfg_mask = []
 for k, m in enumerate(model.modules()):
-    if isinstance(m, nn.BatchNorm2d):
+    if isinstance(m, nn.BatchNorm2d) and m.weight is not None:
         weight_copy = m.weight.data.abs().clone()
         mask = weight_copy.gt(thre).float().cuda()
         pruned = pruned + mask.shape[0] - torch.sum(mask)
@@ -121,12 +124,15 @@ def test(model):
         correct, len(test_loader.dataset), 100. * correct / len(test_loader.dataset)))
     return correct / float(len(test_loader.dataset))
 
-acc = test(model)
+# acc = test(model)
 
 print("Cfg:")
 print(cfg)
 
-newmodel = resnet(depth=args.depth, dataset=args.dataset, cfg=cfg)
+# newmodel = resnet(depth=args.depth, dataset=args.dataset, cfg=cfg)
+num_classes = 100
+image_size = 32
+newmodel = mwr.Model(num_classes, input_size=image_size)
 if args.cuda:
     newmodel.cuda()
 
@@ -135,7 +141,7 @@ savepath = os.path.join(args.save, "{}_prune.txt".format(args.percent))
 with open(savepath, "w") as fp:
     fp.write("Configuration: \n"+str(cfg)+"\n")
     fp.write("Number of parameters: \n"+str(num_parameters)+"\n")
-    fp.write("Test accuracy: \n"+str(acc))
+    # fp.write("Test accuracy: \n"+str(acc))
 
 old_modules = list(model.modules())
 new_modules = list(newmodel.modules())
