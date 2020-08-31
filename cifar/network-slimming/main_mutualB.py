@@ -11,6 +11,7 @@ from torchvision import datasets, transforms
 from torch.autograd import Variable
 
 import models
+from compute_flops import print_model_param_flops
 
 
 # Training settings
@@ -21,7 +22,7 @@ parser.add_argument('--sparsity-regularization', '-sr', dest='sr', action='store
                     help='train with channel sparsity regularization')
 parser.add_argument('--s', type=float, default=0.00001,
                     help='scale sparse rate (default: 0.0001)')
-parser.add_argument('--batch_size', type=int, default=128, metavar='N',
+parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='input batch size for training (default: 64)')
 parser.add_argument('--test-batch-size', type=int, default=256, metavar='N',
                     help='input batch size for testing (default: 256)')
@@ -43,9 +44,13 @@ parser.add_argument('--seed', type=int, default=1995, metavar='S',
                     help='random seed (default: 1)')
 parser.add_argument('--log-interval', type=int, default=100, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--save', default='./logs/wr_c100_final', type=str, metavar='PATH',####
+parser.add_argument('--save', default='./logs', type=str, metavar='PATH',
                     help='path to save prune model (default: current directory)')
-parser.add_argument('--depth', default=28, type=int,
+parser.add_argument('--arch', default='vgg', type=str, 
+                    help='architecture to use')
+parser.add_argument('--scratch',default='', type=str,
+                    help='the PATH to the pruned model')
+parser.add_argument('--depth', default=19, type=int,
                     help='depth of the neural network')
 
 args = parser.parse_args()
@@ -58,6 +63,7 @@ if args.cuda:
 if not os.path.exists(args.save):
     os.makedirs(args.save)
 
+kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 def get_cifar():
     normalize = transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]],
@@ -89,16 +95,33 @@ def get_cifar():
     return train_loader, val_loader
 
 train_loader, test_loader = get_cifar()
-# model = models.__dict__[args.arch](dataset=args.dataset, depth=args.depth)
-##### AADED
 import models.wideresnet as mwr
 num_classes = 100
 image_size = 32
 model = mwr.Model(num_classes, input_size=image_size)
+# model = models.__dict__[args.arch](dataset=args.dataset, depth=args.depth)
+
+if args.scratch:
+    checkpoint = torch.load(args.scratch)
+    model = mwr.Model(num_classes, input_size=image_size, cfg=checkpoint['cfg'])
+    model_ref = mwr.Model(num_classes, input_size=image_size, cfg=checkpoint['cfg'])
+    # model = models.__dict__[args.arch](dataset=args.dataset, depth=args.depth, cfg=checkpoint['cfg'])
+    # model_ref = models.__dict__[args.arch](dataset=args.dataset, depth=args.depth, cfg=checkpoint['cfg'])
+    model_ref.load_state_dict(checkpoint['state_dict'])
+    for m0, m1 in zip(model.modules(), model_ref.modules()):
+        if isinstance(m0, models.channel_selection):
+            m0.indexes.data = m1.indexes.data.clone()
+
+    # model_base = models.__dict__[args.arch](dataset=args.dataset, depth=args.depth)
+    model_base = mwr.Model(num_classes, input_size=image_size)
+    base_flops = print_model_param_flops(model_base, 32)
+    pruned_flops = print_model_param_flops(model, 32)
+    args.epochs = int(160 * (base_flops / pruned_flops))
 
 if args.cuda:
     model.cuda()
 
+# optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
 
 if args.resume:
@@ -119,7 +142,7 @@ history_score = np.zeros((args.epochs - args.start_epoch + 1, 3))
 # additional subgradient descent on the sparsity-induced penalty term
 def updateBN():
     for m in model.modules():
-        if isinstance(m, nn.BatchNorm2d):# and m.weight is not None:
+        if isinstance(m, nn.BatchNorm2d):
             m.weight.grad.data.add_(args.s*torch.sign(m.weight.data))  # L1
 
 def train(epoch):
@@ -157,9 +180,9 @@ def test():
         if args.cuda:
             data, target = data.cuda(), target.cuda()
         with torch.no_grad():
-            # data, target = Variable(data, volatile=True), Variable(target)
+        # data, target = Variable(data, volatile=True), Variable(target)
             output = model(data)
-            # test_loss += F.cross_entropy(output, target, size_average=False).item()#.data[0] # sum up batch loss
+            # test_loss += F.cross_entropy(output, target, size_average=False).data[0] # sum up batch loss
             test_loss += F.cross_entropy(output, target, reduction='sum').item()
             pred = output.data.max(1, keepdim=True)[1] # get the index of the max log-probability
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
@@ -177,7 +200,7 @@ def save_checkpoint(state, is_best, filepath):
 
 best_prec1 = 0.
 for epoch in range(args.start_epoch, args.epochs):
-    if epoch in [args.epochs*0.5, args.epochs*0.75]:
+    if epoch in [int(args.epochs*0.5), int(args.epochs*0.75)]:
         for param_group in optimizer.param_groups:
             param_group['lr'] *= 0.1
     train(epoch)

@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.slimmable_ops import USBatchNorm2d, USConv2d, USLinear, make_divisible
+# from models.slimmable_ops import USBatchNorm2d, USConv2d, USLinear, make_divisible
 # from utils.config import FLAGS
 
 from .channel_selection import channel_selection
@@ -12,20 +12,20 @@ from .channel_selection import channel_selection
 class BasicBlock(nn.Module):
     def __init__(self, in_planes, out_planes, stride, dropRate=0.0):
         super(BasicBlock, self).__init__()
-        self.bn1 = USBatchNorm2d(in_planes)
+        self.bn1 = nn.BatchNorm2d(in_planes)
         ########## ADDED
         self.select = channel_selection(in_planes)
         ###########
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv1 = USConv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+        self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                                padding=1, bias=False)
-        self.bn2 = USBatchNorm2d(out_planes)
+        self.bn2 = nn.BatchNorm2d(out_planes)
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = USConv2d(out_planes, out_planes, kernel_size=3, stride=1,
+        self.conv2 = nn.Conv2d(out_planes, out_planes, kernel_size=3, stride=1,
                                padding=1, bias=False)
         self.droprate = dropRate
         self.equalInOut = (in_planes == out_planes)
-        self.convShortcut = (not self.equalInOut) and USConv2d(in_planes, out_planes, kernel_size=1, stride=stride,
+        self.convShortcut = (not self.equalInOut) and nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride,
                                padding=0, bias=False) or None
     def forward(self, x):
         if not self.equalInOut:
@@ -53,7 +53,7 @@ class NetworkBlock(nn.Module):
         return self.layer(x)
 
 class Model(nn.Module):
-    def __init__(self, num_classes=10, input_size=32):
+    def __init__(self, num_classes=10, input_size=32, cfg=None):
         super(Model, self).__init__()
         depth, widen_factor, dropRate = 28, 10, 0.0
         nChannels = [16, 16*widen_factor, 32*widen_factor, 64*widen_factor]
@@ -61,8 +61,8 @@ class Model(nn.Module):
         n = (depth - 4) / 6
         block = BasicBlock
         # 1st conv before any network block
-        self.conv1 = USConv2d(3, nChannels[0], kernel_size=3, stride=1,
-                               padding=1, bias=False, us=[False, True])
+        self.conv1 = nn.Conv2d(3, nChannels[0], kernel_size=3, stride=1,
+                               padding=1, bias=False) #, us=[False, True])
         # 1st block
         self.block1 = NetworkBlock(n, nChannels[0], nChannels[1], block, 1, dropRate)
         # 2nd block
@@ -70,13 +70,15 @@ class Model(nn.Module):
         # 3rd block
         self.block3 = NetworkBlock(n, nChannels[2], nChannels[3], block, 2, dropRate)
         # global average pooling and classifier
-        self.bn1 = USBatchNorm2d(nChannels[3])
-        ########
-        self.select = channel_selection(nChannels[3])  ##### ADDED
+        self.bn1 = nn.BatchNorm2d(nChannels[3])
+        ########  ADDED
+        self.select = channel_selection(nChannels[3])
         ########
         self.relu = nn.ReLU(inplace=True)
-        self.fc = USLinear(nChannels[3], num_classes, us=[True, False])
+        self.fc = nn.Linear(nChannels[3], num_classes) #, us=[True, False])
         self.nChannels = nChannels[3]
+        if cfg is not None:
+            self.apply_cfg(cfg, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -87,6 +89,38 @@ class Model(nn.Module):
                     m.bias.data.zero_()
             elif isinstance(m, nn.Linear):
                 m.bias.data.zero_()
+                
+    def apply_cfg(self, cfg, num_classes):
+        layers = []
+        for m in self.named_modules():
+            if (isinstance(m[1], nn.Conv2d) or isinstance(m[1], nn.BatchNorm2d)
+                or isinstance(m[1], nn.Linear) or isinstance(m[1], channel_selection)):
+                layers.append(m)
+
+        cfg_idx = 0
+        for m in layers:
+            if isinstance(m[1], nn.Conv2d):
+                keys = m[0].split('.')
+                if len(keys) > 1:
+                    if 'conv1' in keys:
+                        self._modules[keys[0]]._modules[keys[1]]._modules[keys[2]]._modules[keys[3]] = \
+                            nn.Conv2d(cfg[cfg_idx-1], cfg[cfg_idx], kernel_size=m[1].kernel_size,
+                                stride=m[1].stride, padding=m[1].padding, bias=m[1].bias)
+                    elif 'conv2' in keys:
+                            self._modules[keys[0]]._modules[keys[1]]._modules[keys[2]]._modules[keys[3]] = \
+                            nn.Conv2d(cfg[cfg_idx-1], m[1].out_channels, kernel_size=m[1].kernel_size,
+                                stride=m[1].stride, padding=m[1].padding, bias=m[1].bias)
+                    elif 'convShortcut' in keys:
+                        self._modules[keys[0]]._modules[keys[1]]._modules[keys[2]]._modules[keys[3]] = \
+                            nn.Conv2d(cfg[cfg_idx-2], m[1].out_channels, kernel_size=m[1].kernel_size,
+                                stride=m[1].stride, padding=m[1].padding, bias=m[1].bias)
+            elif isinstance(m[1], nn.BatchNorm2d):
+                keys = m[0].split('.')
+                if len(keys) > 1 and 'bn1' not in keys:
+                    self._modules[keys[0]]._modules[keys[1]]._modules[keys[2]]._modules[keys[3]] = nn.BatchNorm2d(cfg[cfg_idx]) 
+                cfg_idx += 1
+            elif isinstance(m[1], nn.Linear):
+                self._modules[m[0]] = nn.Linear(cfg[-1], num_classes)
     def forward(self, x):
         out = self.conv1(x)
         out = self.block1(out)
