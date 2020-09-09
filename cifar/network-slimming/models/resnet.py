@@ -1,6 +1,7 @@
 import torch.nn as nn
 import math
 
+from .channel_selection import channel_selection
 
 # from .slimmable_ops import USBatchNorm2d
 # from .slimmable_ops import USConv2d, USLinear, make_divisible
@@ -31,6 +32,7 @@ class Block(nn.Module):
             # nn.Conv2d(midp, outp, 1, 1, 0, bias=False, ratio=[expand_ratio, 1]),
             nn.Conv2d(midp, outp, 1, 1, 0, bias=False),
             nn.BatchNorm2d(outp),
+            channel_selection(outp),
         ]
         self.body = nn.Sequential(*layers)
 
@@ -80,6 +82,7 @@ class Model(nn.Module):
                 nn.Conv2d(3, channels, 7, 2, 3, bias=False),
                 # USBatchNorm2d(channels, ratio=0.25),
                 nn.BatchNorm2d(channels),
+                channel_selection(channels),
                 nn.ReLU(inplace=True),
                 nn.MaxPool2d(3, 2, 1),
             )
